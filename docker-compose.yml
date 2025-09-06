@@ -1,0 +1,41 @@
+version: "3.9"
+
+services:
+  langflow:
+    image: python:3.11-slim
+    container_name: langflow
+    working_dir: /app
+    environment:
+      - UV_LINK_MODE=copy
+    volumes:
+      - ./.langflow-cache:/root/.cache/uv
+    command: /bin/sh -lc "apt-get update && apt-get install -y curl && curl -LsSf https://astral.sh/uv/install.sh | sh -s -- -y && ~/.local/bin/uv run --python 3.11 langflow run --host 0.0.0.0 --port 7860"
+    ports:
+      - "7860:7860"
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: backend
+    environment:
+      - LANGFLOW_URL=http://langflow:7860
+      - LANGFLOW_FLOW_ID=${LANGFLOW_FLOW_ID}
+    volumes:
+      - ./src/data:/app/src/data
+    ports:
+      - "8000:8000"
+    depends_on:
+      - langflow
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: frontend
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
