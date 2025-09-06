@@ -1,0 +1,18 @@
+Use the existing system prompt. Apply these task-specific constraints and output rules.
+
+Task: Find the most qualified software developers in Stockholm and return the top 50 along with some features and their linkedin most importantly. Do not include anyone that is lacking a linkedin account or who's account you cannot find.
+
+Filters: location contains "Nordics" or Stockholm-adjacent (nearby within 1-2 hour flight). Exclude recruiters and non-dev roles.
+
+Evidence: keep 1–2 short evidence snippets per candidate.
+
+Output: CSV only. No prose, headers, or code fences beyond the CSV header row. Exactly the top 50 rows if available.
+
+CSV headers:
+name,headline,linkedin_url,github_url,affiliations,primary_stack,location,education,years_experience,cold_dm
+
+cold_dm:
+This is to reach out to the person regarding a poker night at the Lovable office in stockholm.
+Something like: "Hi {Name}! Really impressive what you did at {thing}. Do you want to play poker at the lovable office on tuesday?"
+
+CSV rules: comma-separated, UTF-8, quote fields that contain commas, no trailing commas, no extra lines. Make sure to have 9 parameters according to the headers of the CSV formatting for each person you find, else the CSV formatting will not work.
