@@ -1,12 +1,12 @@
 ### Lovable Candidate Knowledge Graph
 
-Build and visualize a candidate knowledge graph backed by Neo4j + GDS with sentence-transformer embeddings and clean community detection.
+Build and visualize a candidate knowledge graph backed by Neo4j + GDS with sentence-transformer embeddings and clean community detection. See similary between candidates and generated ideal profiles based off of job opening descriptions.
 
-![Graph](image.png)
+image.png
 
 ### Prereqs
 - Python 3.11+
-- uv (`pip install uv`)
+- uv (`pip install uv`) - otherwise can use apt or package manager
 - Docker with Docker Compose (recommended, for Neo4j + GDS)
 
 ### Setup
