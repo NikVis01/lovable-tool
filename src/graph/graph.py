@@ -17,7 +17,7 @@ load_dotenv()
 # --------------------
 # CONFIG
 # --------------------
-CSV_PATH = "data/candidates1-clay.csv"
+CSV_PATH = "data/candidates.csv"
 TEXT_COLS = ["Name","LinkedIn","Github","Affiliations","Tech stack","Location","Most Notable Company","Coolest Problem","Degree"]
 ID_COL = "id"
 
@@ -60,6 +60,8 @@ class CandidateKnowledgeGraph:
         """Load and prepare candidate data."""
         print("Loading candidate data...")
         self.df = pd.read_csv(self.csv_path)
+        # Normalize and alias columns to expected canonical names
+        self._ensure_canonical_columns()
         
         # Add ID column if not present
         if ID_COL not in self.df.columns:
@@ -69,6 +71,7 @@ class CandidateKnowledgeGraph:
         for col in TEXT_COLS:
             if col in self.df.columns:
                 self.df[col] = self.df[col].fillna('')
+                self.df[col] = self.df[col].replace({'Null': '', 'NULL': '', 'null': ''})
         
         # Clean Years Experience column
         if 'Years Experience' in self.df.columns:
@@ -88,9 +91,12 @@ class CandidateKnowledgeGraph:
     def create_embeddings(self):
         """Create embeddings for candidate data."""
         print("Creating embeddings...")
-        
-        # Combine text columns
-        texts = self.df[TEXT_COLS].astype(str).agg(" ".join, axis=1).tolist()
+        # Combine available text columns (avoid KeyError if any missing)
+        available = [c for c in TEXT_COLS if c in self.df.columns]
+        if not available:
+            # Fallback: use any string-like columns
+            available = [c for c in self.df.columns if self.df[c].dtype == object]
+        texts = self.df[available].astype(str).agg(" ".join, axis=1).tolist()
         
         # Load sentence transformer model
         self.model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
@@ -102,6 +108,41 @@ class CandidateKnowledgeGraph:
         
         print(f"Created embeddings with shape: {self.embeddings.shape}")
         return self.embeddings
+
+    # --------------------
+    # Helpers
+    # --------------------
+    def _ensure_canonical_columns(self):
+        """Map variant CSV headers to canonical names and backfill missing ones."""
+        def norm(s: str) -> str:
+            return "".join(ch for ch in s.lower().strip() if ch.isalnum())
+
+        colmap = {norm(c): c for c in self.df.columns}
+        aliases = {
+            'Name': ['name', 'fullname', 'candidate', 'candidate_name'],
+            'LinkedIn': ['linkedin', 'linkedinurl', 'linkedin_url', 'linkedIn', 'li', 'publiclink', 'public_link', 'linkedinprofile', 'linkedinprofileurl'],
+            'Github': ['github', 'githuburl', 'github_url', 'gitHub', 'gh'],
+            'Affiliations': ['affiliations', 'schoolaffiliation', 'school', 'organization', 'org'],
+            'Tech stack': ['techstack', 'skills', 'stack', 'primarystack', 'primary_stack'],
+            'Location': ['location', 'city', 'country'],
+            'Most Notable Company': ['mostnotablecompany', 'company', 'employer'],
+            'Coolest Problem': ['coolestproblem', 'summary', 'shortsummary', 'notes'],
+            'Degree': ['degree', 'degreeyear', 'degreeyearsketch', 'education'],
+            'Years Experience': ['yearsexperience', 'years_experience', 'experienceyears', 'years', 'exp']
+        }
+        # Create canonical columns if missing by mapping or filling empty
+        for canon, variants in aliases.items():
+            found = None
+            for v in variants:
+                if v in colmap:
+                    found = colmap[v]
+                    break
+            if found is not None:
+                if found != canon and canon not in self.df.columns:
+                    self.df[canon] = self.df[found]
+            elif canon not in self.df.columns:
+                # backfill empty string except numeric experience
+                self.df[canon] = '' if canon != 'Years Experience' else 0.0
     
     def store_candidates_in_neo4j(self):
         """Store candidates and embeddings in Neo4j."""
@@ -182,9 +223,10 @@ class CandidateKnowledgeGraph:
             """)
             print("✅ GDS graph projection 'candidates' created successfully")
     
-    def compute_similarity_with_gds(self, threshold=0.4):
+    def compute_similarity_with_gds(self, threshold=0.6):
         """Use GDS to compute similarity and create relationships."""
         print("Computing similarity using GDS...")
+        
         
         # Use the embeddings we already created instead of GDS FastRP
         # This avoids the session issue with GDS projections
@@ -217,9 +259,151 @@ class CandidateKnowledgeGraph:
             
             print(f"Created {relationships_created} similarity relationships")
             return self.similarity_matrix
+
+    def apply_cosine_communities(self, threshold: float | None = None):
+        """Compute communities using pure cosine-similarity connectivity (no GDS).
+
+        Strategy: Build an implicit graph where edges exist for pairs with
+        similarity > threshold, then assign communities as connected components.
+        """
+        print("Assigning communities by cosine similarity (no GDS)...")
+        if threshold is None:
+            try:
+                threshold = float(os.getenv("COSINE_SIM_THRESHOLD", "0.25"))
+            except ValueError:
+                threshold = 0.25
+        if self.similarity_matrix is None:
+            self.similarity_matrix = cosine_similarity(self.embeddings)
+
+        n = len(self.df)
+        communities = [-1] * n
+
+        def dfs(start: int, cid: int):
+            stack = [start]
+            communities[start] = cid
+            while stack:
+                u = stack.pop()
+                # Iterate neighbors by threshold
+                for v in range(n):
+                    if v == u:
+                        continue
+                    if communities[v] != -1:
+                        continue
+                    if self.similarity_matrix[u, v] > threshold:
+                        communities[v] = cid
+                        stack.append(v)
+
+        cid = 0
+        for i in range(n):
+            if communities[i] == -1:
+                dfs(i, cid)
+                cid += 1
+
+        # Persist community to Neo4j
+        with self.driver.session() as session:
+            for idx, comm in enumerate(communities):
+                session.run(
+                    "MATCH (c:Candidate) WHERE c.id = $id SET c.community = $community",
+                    { 'id': idx, 'community': int(comm) }
+                )
+
+        self.communities = communities
+        # Mirror to dataframe for downstream analysis
+        self.df['community'] = self.communities
+        print(f"Assigned {cid} cosine communities")
+        return communities
+
+    def label_nodes_by_community(self, max_old_labels: int = 100):
+        """Attach label Community{n} to each Candidate node based on c.community.
+
+        Also attempts to remove a bounded set of old Community labels to avoid label buildup.
+        """
+        print("Updating node labels by community for Neo4j Browser coloring...")
+        with self.driver.session() as session:
+            # Best-effort cleanup of prior community labels (0..max_old_labels-1)
+            for k in range(max_old_labels):
+                lbl = f"Community{k}"
+                try:
+                    session.run(f"MATCH (c:Candidate:{lbl}) REMOVE c:{lbl}")
+                except Exception:
+                    pass
+            # Apply current labels
+            for idx, comm in enumerate(self.communities):
+                lbl = f"Community{int(comm)}"
+                session.run(
+                    f"MATCH (c:Candidate) WHERE c.id = $id SET c:{lbl}",
+                    { 'id': idx }
+                )
+
+    def apply_mutual_knn_communities(self, k: int | None = None):
+        """Split graph into communities using mutual k-NN graph components.
+
+        - For each node, connect to its top-k most similar neighbors (excluding self).
+        - Keep an undirected edge only if the relation is mutual (i in top-k of j, j in top-k of i).
+        - Communities are connected components of this mutual k-NN graph.
+        """
+        if self.similarity_matrix is None:
+            self.similarity_matrix = cosine_similarity(self.embeddings)
+        n = len(self.df)
+        if k is None:
+            try:
+                k = int(os.getenv("KNN_K", "3"))
+            except ValueError:
+                k = 3
+        k = max(1, min(k, max(1, n - 1)))
+
+        # For each node, get indices of top-k similar nodes
+        topk = []
+        for i in range(n):
+            sims = self.similarity_matrix[i].copy()
+            sims[i] = -1.0
+            idxs = np.argsort(-sims)[:k]
+            topk.append(set(int(j) for j in idxs))
+
+        # Build mutual edges
+        adj = [[] for _ in range(n)]
+        for i in range(n):
+            for j in topk[i]:
+                if i in topk[j]:
+                    adj[i].append(j)
+                    adj[j].append(i)
+
+        # Connected components
+        communities = [-1] * n
+        cid = 0
+        for i in range(n):
+            if communities[i] != -1:
+                continue
+            stack = [i]
+            communities[i] = cid
+            while stack:
+                u = stack.pop()
+                for v in adj[u]:
+                    if communities[v] == -1:
+                        communities[v] = cid
+                        stack.append(v)
+            cid += 1
+
+        # Persist results
+        self.communities = communities
+        self.df['community'] = self.communities
+        with self.driver.session() as session:
+            for idx, comm in enumerate(self.communities):
+                session.run(
+                    "MATCH (c:Candidate) WHERE c.id = $id SET c.community = $comm",
+                    { 'id': idx, 'comm': int(comm) }
+                )
+        print(f"Assigned {cid} mutual-kNN communities (k={k})")
+        return communities
     
-    def apply_leiden_clustering_gds(self):
-        """Apply Leiden clustering using GDS."""
+    def apply_leiden_clustering_gds(self, random_seed: int = 23, include_intermediate: bool = False,
+                                    min_communities: int = 3, start_resolution: float = 1.0,
+                                    max_resolution: float = 64.0, resolution_multiplier: float = 1.5):
+        """Apply Leiden clustering using GDS and try to reach at least min_communities.
+
+        We tune the 'resolution' parameter until the number of discovered communities
+        is >= min_communities or we reach max_resolution. See docs: https://neo4j.com/docs/graph-data-science/current/algorithms/leiden/
+        """
         print("Applying Leiden clustering using GDS...")
         
         with self.driver.session() as session:
@@ -253,21 +437,31 @@ class CandidateKnowledgeGraph:
             """)
             print("Created 'candidates_with_relationships' graph projection with undirected relationships")
             
-            # Apply Leiden algorithm in the same session
-            result = session.run("""
-                CALL gds.leiden.stream('candidates_with_relationships', {
-                    relationshipWeightProperty: 'similarity',
-                    randomSeed: 42
-                })
-                YIELD nodeId, communityId
-                RETURN nodeId, communityId
-                ORDER BY communityId, nodeId
-            """)
-            
-            # Store community assignments
-            communities = {}
-            for record in result:
-                communities[record['nodeId']] = record['communityId']
+            # Sweep resolution to target a minimum number of communities
+            resolution = float(start_resolution)
+            communities = None
+            while True:
+                cfg = {
+                    'relationshipWeightProperty': 'similarity',
+                    'randomSeed': random_seed,
+                    'resolution': resolution,
+                }
+                if include_intermediate:
+                    cfg['includeIntermediateCommunities'] = True
+                result = session.run(
+                    "CALL gds.leiden.stream('candidates_with_relationships', $cfg) "
+                    "YIELD nodeId, communityId RETURN nodeId, communityId",
+                    { 'cfg': cfg }
+                )
+                tmp = {}
+                for record in result:
+                    tmp[record['nodeId']] = record['communityId']
+                count = len(set(tmp.values()))
+                print(f"Leiden resolution={resolution} -> {count} communities")
+                communities = tmp
+                if count >= min_communities or resolution >= max_resolution:
+                    break
+                resolution *= resolution_multiplier
             
             # Update candidates with community information
             for node_id, community_id in communities.items():
@@ -345,6 +539,31 @@ class CandidateKnowledgeGraph:
             
             return nodes, edges
     
+    def _build_community_color_map(self) -> dict:
+        """Assign a distinct color for each unique community id."""
+        if self.communities is None:
+            return {}
+        unique = sorted(set(self.communities))
+        # Compose a large palette and extend if needed
+        palette = (
+            px.colors.qualitative.Dark24
+            + px.colors.qualitative.Set3
+            + px.colors.qualitative.Plotly
+            + px.colors.qualitative.Prism
+            + px.colors.qualitative.Safe
+            + px.colors.qualitative.Alphabet
+        )
+        if len(unique) > len(palette):
+            # Generate additional hues if communities exceed palette size
+            import colorsys
+            extra = []
+            for k in range(len(unique) - len(palette)):
+                h = (k / max(1, len(unique)))
+                r, g, b = [int(255 * v) for v in colorsys.hsv_to_rgb(h, 0.6, 0.95)]
+                extra.append(f"rgb({r},{g},{b})")
+            palette = palette + extra
+        return {comm: palette[i] for i, comm in enumerate(unique)}
+
     def visualize_graph(self, save_path=None):
         """Create interactive visualization of the knowledge graph."""
         print("Creating graph visualization...")
@@ -388,11 +607,11 @@ class CandidateKnowledgeGraph:
         node_x = []
         node_y = []
         node_text = []
-        node_colors = []
         node_sizes = []
+        node_comms = []
         
-        # Color map for communities
-        colors = px.colors.qualitative.Set3
+        # Color map for communities (unique mapping)
+        color_map = self._build_community_color_map()
         
         for i, node in enumerate(nodes):
             angle = 2 * np.pi * i / len(nodes)
@@ -408,34 +627,44 @@ class CandidateKnowledgeGraph:
             community = node['community']
             
             node_text.append(f"{name}<br>Tech: {tech}<br>Community: {community}")
-            node_colors.append(colors[community % len(colors)])
+            node_comms.append(community)
             
             # Size based on number of connections
             connections = len([e for e in edges if e['source'] == node['id'] or e['target'] == node['id']])
             node_sizes.append(max(10, min(30, connections * 3)))
         
-        node_trace = go.Scatter(
-            x=node_x, y=node_y,
-            mode='markers+text',
-            hoverinfo='text',
-            text=[node['name'] for node in nodes],
-            textposition="middle center",
-            hovertext=node_text,
-            marker=dict(
-                size=node_sizes,
-                color=node_colors,
-                line=dict(width=2, color='black')
+        # Build separate traces per community for distinct coloring and legend
+        node_traces = []
+        names = [node['name'] for node in nodes]
+        unique_comms = sorted(set(node_comms))
+        for comm in unique_comms:
+            idxs = [i for i,c in enumerate(node_comms) if c == comm]
+            node_traces.append(
+                go.Scatter(
+                    x=[node_x[i] for i in idxs],
+                    y=[node_y[i] for i in idxs],
+                    mode='markers+text',
+                    name=f"Community {comm}",
+                    hoverinfo='text',
+                    text=[names[i] for i in idxs],
+                    textposition="middle center",
+                    hovertext=[node_text[i] for i in idxs],
+                    marker=dict(
+                        size=[node_sizes[i] for i in idxs],
+                        color=color_map.get(comm, '#8888ff'),
+                        line=dict(width=2, color='black')
+                    )
+                )
             )
-        )
         
         # Create the plot
-        fig = go.Figure(data=[edge_trace, node_trace],
+        fig = go.Figure(data=[edge_trace] + node_traces,
                        layout=go.Layout(
                            title=dict(
                                text='Candidate Knowledge Graph with GDS Leiden Communities',
                                font=dict(size=16)
                            ),
-                           showlegend=False,
+                           showlegend=True,
                            hovermode='closest',
                            margin=dict(b=20,l=5,r=5,t=40),
                            annotations=[ dict(
@@ -536,14 +765,13 @@ class CandidateKnowledgeGraph:
             # Store candidates in Neo4j
             self.store_candidates_in_neo4j()
             
-            # Create GDS graph projection
-            self.create_gds_graph()
-            
-            # Compute similarity using GDS
+            # Compute similarity and create SIMILAR_TO edges
             self.compute_similarity_with_gds()
             
-            # Apply Leiden clustering using GDS
-            self.apply_leiden_clustering_gds()
+            # Apply communities via mutual k-NN to encourage multiple clusters
+            self.apply_mutual_knn_communities()
+            # Label nodes with community-specific labels for easy coloring in Browser
+            self.label_nodes_by_community()
             
             # Analyze communities
             community_stats = self.analyze_communities()

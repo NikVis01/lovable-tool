@@ -16,7 +16,7 @@ def main():
     print("=" * 80)
     
     # Path to the CSV file
-    csv_path = 'src/graph/data/candidates1-clay.csv'
+    csv_path = 'src/graph/data/candidates.csv'
     
     try:
         # Create the knowledge graph
