@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -8,8 +9,10 @@ from sentence_transformers import SentenceTransformer
 from neo4j import GraphDatabase
 from sklearn.metrics.pairwise import cosine_similarity
 from collections import defaultdict
+from dotenv import load_dotenv
 import warnings
 warnings.filterwarnings('ignore')
+load_dotenv()
 
 # --------------------
 # CONFIG
@@ -18,14 +21,14 @@ CSV_PATH = "data/candidates1-clay.csv"
 TEXT_COLS = ["Name","LinkedIn","Github","Affiliations","Tech stack","Location","Most Notable Company","Coolest Problem","Degree"]
 ID_COL = "id"
 
-NEO4J_URI = "neo4j://127.0.0.1:7687"
-NEO4J_USER = "neo4j"
-NEO4J_PASS = "Password"
+NEO4J_URI = os.getenv("NEO4J_URI", "bolt://127.0.0.1:7687")
+NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
+NEO4J_PASS = os.getenv("NEO4J_PASSWORD", os.getenv("NEO4J_PASS", "Password"))
 
 AUTH = (NEO4J_USER, NEO4J_PASS)
 
 class CandidateKnowledgeGraph:
-    def __init__(self):
+    def __init__(self, csv_path=None):
         """Initialize the knowledge graph with Neo4j connection."""
         self.driver = None
         self.df = None
@@ -33,10 +36,12 @@ class CandidateKnowledgeGraph:
         self.similarity_matrix = None
         self.communities = None
         self.model = None
+        self.csv_path = csv_path or CSV_PATH
         
     def connect_neo4j(self):
         """Connect to Neo4j database."""
         try:
+            print(f"Connecting to Neo4j at {NEO4J_URI} as {NEO4J_USER}")
             self.driver = GraphDatabase.driver(NEO4J_URI, auth=AUTH)
             self.driver.verify_connectivity()
             print(f"✅ Connected to Neo4j at {NEO4J_URI}")
@@ -54,7 +59,7 @@ class CandidateKnowledgeGraph:
     def load_and_prepare_data(self):
         """Load and prepare candidate data."""
         print("Loading candidate data...")
-        self.df = pd.read_csv(CSV_PATH)
+        self.df = pd.read_csv(self.csv_path)
         
         # Add ID column if not present
         if ID_COL not in self.df.columns:
@@ -92,6 +97,8 @@ class CandidateKnowledgeGraph:
         
         # Create embeddings
         self.embeddings = self.model.encode(texts, normalize_embeddings=True)
+        # Expose alias expected by tests
+        self.tensor_embeddings = self.embeddings
         
         print(f"Created embeddings with shape: {self.embeddings.shape}")
         return self.embeddings
