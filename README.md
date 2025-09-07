@@ -1,6 +1,6 @@
 ### Lovable Candidate Knowledge Graph
 
-Build and visualize a candidate knowledge graph backed by Neo4j + GDS with sentence-transformer embeddings and clean community detection. See similary between candidates and generated ideal profiles based off of job opening descriptions.
+Build and visualize a candidate knowledge graph backed by Neo4j + GDS with sentence-transformer embeddings and clean community detection. See similary between candidates and generated ideal profiles based on job opening descriptions. Built as an R&D project for candidate matching and recruitment at Lovable 6-7th September.
 
 image.png
 
