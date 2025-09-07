@@ -204,6 +204,9 @@ class CandidateKnowledgeGraph:
                     degree: $degree,
                     embedding: $embedding
                 })
+                WITH c
+                FOREACH (_ IN CASE WHEN toUpper($type) = 'HUMAN' THEN [1] ELSE [] END | SET c:HUMAN)
+                FOREACH (_ IN CASE WHEN toUpper($type) = 'GENERATED' THEN [1] ELSE [] END | SET c:GENERATED)
                 """
                 
                 session.run(query, {
